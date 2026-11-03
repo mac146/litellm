@@ -4,12 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use litellm_circuit_breaker::{Admission, Breaker, Failure};
+use litellm_circuit_breaker::{Admission, Breaker, Failure, State};
 use redis::{Cmd, FromRedisValue, RedisError, ToRedisArgs, ToSingleRedisArg, Value};
 
 use crate::{
     CallEvent, ConnectError, Error, Expiry, FailureKind, Namespace, Operation, Outcome, Pipeline,
-    RedisConfig, RedisEvents, Script,
+    RedisBatch, RedisConfig, RedisEvents, Script,
     commands::{self, ScriptCall},
     connection::Connection,
 };
@@ -41,6 +41,11 @@ impl RedisClient {
             health_check: config.health_check,
             last_used: Arc::new(Mutex::new(Instant::now())),
         })
+    }
+
+    /// The breaker's current state, or none when the breaker is disabled.
+    pub fn breaker_state(&self) -> Option<State> {
+        self.breaker.as_ref().map(Breaker::state)
     }
 
     pub async fn ping(&self) -> Result<(), Error> {
@@ -143,6 +148,14 @@ impl RedisClient {
 
     pub fn pipeline(&self) -> Pipeline {
         Pipeline::new(self.namespace.clone())
+    }
+
+    pub fn same_client(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.last_used, &other.last_used)
+    }
+
+    pub fn batch(&self) -> RedisBatch {
+        RedisBatch::new(self.clone())
     }
 
     pub async fn run(&self, pipeline: &Pipeline) -> Vec<Result<Value, Error>> {
