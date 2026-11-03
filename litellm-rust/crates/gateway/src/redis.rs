@@ -109,8 +109,12 @@ fn redis_cache_params(config: &Config) -> Option<&RedisSettings> {
 fn resolve(configured: &ConfiguredRedis, lookup: &dyn Lookup) -> Result<Params, RedisError> {
     let secrets = SecretSnapshot::read(configured.secret_names(), lookup);
     let Resolution { redis, ignored } = configured.resolve(&secrets, lookup)?;
-    for setting in ignored {
-        tracing::warn!(%setting, "Redis setting is accepted but ignored");
+    for ignored in ignored {
+        tracing::warn!(
+            "Redis setting {} is not supported by the Rust client and is ignored: {}",
+            ignored.setting,
+            ignored.consequence
+        );
     }
     Ok(redis)
 }
@@ -256,6 +260,7 @@ mod tests {
                 port,
                 tls: None,
                 db: 0,
+                unix_socket_path: None,
             }),
             auth: RedisAuth::Static {
                 username: None,
@@ -264,6 +269,7 @@ mod tests {
             namespace: None,
             timeout: None,
             connect_timeout: None,
+            health_check_interval: None,
         }
     }
 

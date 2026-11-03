@@ -5,39 +5,47 @@ use litellm_secret_value::SecretValue;
 
 use super::{
     Expected, RedisError,
+    keys::Ignored,
     layers::Entry,
     options::{Options, as_text, flag, integer, invalid, secret, text},
     tls,
 };
 use crate::Value;
 
-/// The target, first match wins like `get_redis_client`: cluster, url, Sentinel, then host.
-pub(super) fn endpoint(options: &Options, auth: &RedisAuth) -> Result<Endpoint, RedisError> {
+/// The target, first match wins like `get_redis_client`: cluster, url, Sentinel, then host. A
+/// url also returns the query parameters it ignores.
+pub(super) fn endpoint(
+    options: &Options,
+    auth: &RedisAuth,
+) -> Result<(Endpoint, Vec<Ignored>), RedisError> {
     if let Some(nodes) = cluster_nodes(options.startup_nodes.as_ref())? {
         reject_cluster_db(options.db.as_ref())?;
-        return Ok(Endpoint::Cluster(ClusterEndpoint {
+        let cluster = ClusterEndpoint {
             nodes,
             tls: tls_for(options, auth)?,
-        }));
+        };
+        return Ok((Endpoint::Cluster(cluster), Vec::new()));
     }
     if let Some(url) = text(options.url.as_ref()) {
-        return Ok(Endpoint::Url {
-            tls: tls::url_tls(&url)?,
-            url: SecretValue::new(match auth {
-                RedisAuth::Static { .. } => url,
-                _ => without_userinfo(&url),
-            }),
+        let (tls, ignored) = tls::url_tls(&url)?;
+        let url = SecretValue::new(match auth {
+            RedisAuth::Static { .. } => url,
+            _ => without_userinfo(&url),
         });
+        return Ok((Endpoint::Url { url, tls }, ignored));
     }
     if let Some(sentinels) = options.sentinel.nodes.as_ref() {
-        return sentinel(options, auth, sentinels).map(Endpoint::Sentinel);
+        let sentinel = sentinel(options, auth, sentinels)?;
+        return Ok((Endpoint::Sentinel(sentinel), Vec::new()));
     }
-    Ok(Endpoint::Host(HostEndpoint {
+    let host = HostEndpoint {
         host: text(options.host.as_ref()).ok_or(RedisError::NoTarget)?,
         port: integer(options.port.as_ref())?.unwrap_or(6379),
         tls: tls_for(options, auth)?,
         db: db(options)?,
-    }))
+        unix_socket_path: text(options.unix_socket_path.as_ref()).map(Into::into),
+    };
+    Ok((Endpoint::Host(host), Vec::new()))
 }
 
 fn tls_for(options: &Options, auth: &RedisAuth) -> Result<Option<TlsOptions>, RedisError> {

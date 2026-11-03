@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use litellm_core_utils::settings::Lookup;
 use litellm_redis_types::{Endpoint, RedisAuth, ResolvedRedis};
@@ -17,6 +17,7 @@ mod secrets;
 mod tls;
 
 pub use error::{Expected, RedisError};
+pub use keys::Ignored;
 pub use secrets::SecretSnapshot;
 
 use options::Options;
@@ -88,8 +89,7 @@ enum Nulls {
 #[derive(Debug)]
 pub struct Resolution {
     pub redis: ResolvedRedis,
-    /// Where each ignored setting came from: its key, or the environment variable that set it.
-    pub ignored: Vec<String>,
+    pub ignored: Vec<Ignored>,
 }
 
 impl RedisSettings {
@@ -158,9 +158,9 @@ impl ConfiguredRedis {
         environment: &dyn Lookup,
     ) -> Result<Resolution, RedisError> {
         let kwargs = layers::merged(self, secrets);
-        let (options, ignored) = Options::read(kwargs, secrets)?;
+        let (options, configured_ignored) = Options::read(kwargs, secrets);
         let auth = auth::redis_auth(&options, environment)?;
-        let endpoint = endpoint::endpoint(&options, &auth)?;
+        let (endpoint, url_ignored) = endpoint::endpoint(&options, &auth)?;
         let auth = match (&endpoint, auth) {
             (Endpoint::Url { .. }, RedisAuth::Static { username, .. }) => RedisAuth::Static {
                 username,
@@ -175,8 +175,13 @@ impl ConfiguredRedis {
                 namespace: options::text(options.namespace.as_ref()),
                 timeout: options::seconds(options.socket_timeout.as_ref())?,
                 connect_timeout: options::seconds(options.socket_connect_timeout.as_ref())?,
+                health_check_interval: options::integer::<i64>(
+                    options.health_check_interval.as_ref(),
+                )?
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| Duration::from_secs(seconds.unsigned_abs())),
             },
-            ignored,
+            ignored: configured_ignored.into_iter().chain(url_ignored).collect(),
         })
     }
 }
