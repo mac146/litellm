@@ -359,14 +359,15 @@ def test_daily_organization_uses_frozen_charged_identity(organization_id: str | 
         assert dict(daily[0].increments)["spend"] == 0.25
 
 
-def test_tag_too_long_for_the_daily_index_still_charges_every_other_entity() -> None:
+def test_ids_too_long_for_an_index_still_charge_every_other_entity() -> None:
     oversized: Final = "x" * 16384
     row: Final[Mapping[str, object]] = {
-        "request_id": "oversized-tag",
+        "request_id": "oversized-ids",
         "startTime": _NOW,
         "api_key": "key",
         "user": "user",
         "team_id": "team",
+        "end_user": oversized,
         "model": "unpriced-projection-test",
         "model_group": "group",
         "custom_llm_provider": "openai",
@@ -379,6 +380,7 @@ def test_tag_too_long_for_the_daily_index_still_charges_every_other_entity() -> 
     charged_tables: Final = {item.table for item in contributions}
     assert daily_tag_ids == {"normal"}
     assert {"LiteLLM_VerificationToken", "LiteLLM_TeamTable", "LiteLLM_DailyUserSpend"} <= charged_tables
+    assert not {"LiteLLM_EndUserTable", "LiteLLM_DailyEndUserSpend"} & charged_tables
 
 
 def test_stored_payload_keeps_guardrail_billing_but_not_guardrail_content() -> None:

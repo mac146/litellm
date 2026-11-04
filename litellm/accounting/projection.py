@@ -13,7 +13,7 @@ from litellm.constants import (
     MODEL_INSIGHTS_TASK_TAG_PREFIX,
 )
 from litellm.litellm_core_utils.llm_cost_calc.guardrail_cost import GuardrailCostByUnitEntry
-from litellm.proxy.db.daily_spend_bulk_upsert import DAILY_SPEND_TABLES, daily_spend_entity_ids
+from litellm.proxy.db.daily_spend_bulk_upsert import DAILY_SPEND_TABLES, daily_spend_entity_ids, fits_btree_index
 from litellm.proxy.db.model_insights_tasks import load_model_insight_tasks
 from litellm.proxy.route_llm_request import ROUTE_ENDPOINT_MAPPING
 from litellm.proxy.spend_tracking.compression_savings import extract_compression_saved_tokens
@@ -57,6 +57,10 @@ def _tags(row: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(tag for tag in parsed if isinstance(tag, str))
 
 
+def _indexable(value: object) -> object:
+    return value if not isinstance(value, str) or fits_btree_index(value) else None
+
+
 def _date(row: Mapping[str, object]) -> str | None:
     start: Final = row.get("startTime")
     if isinstance(start, datetime):
@@ -83,7 +87,7 @@ def _entity_contributions(row: Mapping[str, object], metadata: Mapping[str, obje
         ),
         ("LiteLLM_TeamTable", "team_id", entities.get("team_id")),
         ("LiteLLM_OrganizationTable", "organization_id", entities.get("organization_id")),
-        ("LiteLLM_EndUserTable", "user_id", entities.get("end_user")),
+        ("LiteLLM_EndUserTable", "user_id", _indexable(entities.get("end_user"))),
         ("LiteLLM_AgentsTable", "agent_id", entities.get("agent_id")),
         (
             "LiteLLM_ProjectTable",
