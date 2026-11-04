@@ -1,21 +1,14 @@
-import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import { setServerRootPath } from "@/lib/serverRootPath";
+import { render } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 import { AriaAvatar } from "./AriaAvatar";
 
 describe("AriaAvatar", () => {
-  afterEach(() => {
-    setServerRootPath("/");
-  });
+  it("renders a decorative icon sized by the size prop", () => {
+    const { container } = render(<AriaAvatar size={40} />);
 
-  it.each(["/", "/litellm"])("loads the bundled image when the server root is %s", (root) => {
-    setServerRootPath(root);
-
-    render(<AriaAvatar />);
-
-    expect(screen.getByRole("presentation", { hidden: true })).toHaveAttribute(
-      "src",
-      "/_next/static/media/aria-agent.png",
-    );
+    const icon = container.firstElementChild as HTMLElement;
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon.style.width).toBe("40px");
+    expect(icon.querySelector("svg")).not.toBeNull();
   });
 });

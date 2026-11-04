@@ -365,7 +365,7 @@ function Panel({
         className={cn(
           "flex h-[min(48rem,calc(100dvh-2rem))] flex-col gap-0 overflow-hidden p-0 shadow-xl sm:max-w-4xl",
           pageContainer &&
-            "relative top-auto left-auto z-auto h-full max-w-none translate-x-0 translate-y-0 rounded-none shadow-none ring-0 data-open:animate-none sm:max-w-none",
+            "relative top-auto left-auto z-auto h-full max-w-none translate-x-0 translate-y-0 rounded-none bg-background shadow-none ring-0 data-open:animate-none sm:max-w-none *:mx-auto *:w-full *:max-w-3xl",
         )}
       >
         {children}

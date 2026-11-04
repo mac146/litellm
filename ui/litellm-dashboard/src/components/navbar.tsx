@@ -1,6 +1,5 @@
 import { useHealthReadinessDetails } from "@/app/(dashboard)/hooks/healthReadiness/useHealthReadinessDetails";
 import { useDisableBouncingIcon } from "@/app/(dashboard)/hooks/useDisableBouncingIcon";
-import { useDisableShowPrompts } from "@/app/(dashboard)/hooks/useDisableShowPrompts";
 import { useWorker } from "@/hooks/useWorker";
 import { getProxyBaseUrl } from "@/components/networking";
 import { uiHref } from "@/utils/uiHref";
@@ -11,13 +10,10 @@ import { Badge } from "@/components/ui/badge";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import React from "react";
-import { BlogDropdown } from "./Navbar/BlogDropdown/BlogDropdown";
-import { DocsLink } from "./Navbar/DocsLink/DocsLink";
-import { CommunityEngagementButtons } from "./Navbar/CommunityEngagementButtons/CommunityEngagementButtons";
 import { cn } from "@/lib/cva.config";
 import { NotificationsBell } from "./Navbar/NotificationsBell/NotificationsBell";
+import { BellResources, InlineResourceLinks } from "./TopBar/ResourceLinks";
 import UserDropdown from "./Navbar/UserDropdown/UserDropdown";
-import ThemeToggle from "./ThemeToggle/ThemeToggle";
 import ViewSwitcher from "./Navbar/ViewSwitcher";
 import WorkerDropdown from "./Navbar/WorkerDropdown/WorkerDropdown";
 
@@ -43,7 +39,6 @@ const Navbar: React.FC<NavbarProps> = ({
   const { data: healthData } = useHealthReadinessDetails(accessToken);
   const version = healthData?.litellm_version;
   const disableBouncingIcon = useDisableBouncingIcon();
-  const hideCommunityLinks = useDisableShowPrompts();
   const { isControlPlane, selectedWorker } = useWorker();
   const showWorkerSwitch = isControlPlane && selectedWorker !== null;
 
@@ -94,7 +89,7 @@ const Navbar: React.FC<NavbarProps> = ({
                 </div>
               </Link>
               {version && (
-                <div className="relative">
+                <div className="relative max-md:hidden">
                   {!disableBouncingIcon && (
                     <span
                       className="absolute -left-2 -top-1 animate-bounce text-lg"
@@ -120,7 +115,7 @@ const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           {!isPublicPage && (
-            <div className="ml-4 flex shrink-0 items-center border-l border-border pl-4">
+            <div className="ml-4 flex shrink-0 items-center border-l border-border pl-4 max-md:hidden">
               <ViewSwitcher />
             </div>
           )}
@@ -132,28 +127,14 @@ const Navbar: React.FC<NavbarProps> = ({
               </div>
             )}
 
-            <nav
-              aria-label="Product documentation"
-              className={`flex min-w-0 items-center gap-2 ${showWorkerSwitch ? "border-l border-border pl-4" : ""}`}
-            >
-              <DocsLink />
-              <BlogDropdown />
-            </nav>
-
-            {!hideCommunityLinks && (
-              <div className="flex shrink-0 items-center border-l border-border pl-4">
-                <CommunityEngagementButtons />
-              </div>
-            )}
+            <InlineResourceLinks textLinks={false} className="hidden md:flex" />
 
             {!isPublicPage && (
               <div className="flex shrink-0 items-center border-l border-border pl-4">
-                <div className="flex items-center gap-0.5 rounded-lg bg-muted px-1 py-0 transition-colors hover:bg-accent">
-                  <ThemeToggle />
-                  <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
+                <div className="flex items-center gap-1">
                   {deploymentHealth}
-                  <NotificationsBell accessToken={accessToken} />
-                  <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
+                  <NotificationsBell accessToken={accessToken} footer={<BellResources />} />
+                  <span className="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden />
                   <UserDropdown onLogout={handleLogout} />
                 </div>
               </div>

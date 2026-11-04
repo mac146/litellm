@@ -83,11 +83,9 @@ import {
 import BetaBadge from "./BetaBadge";
 import SidebarAccountMenu from "./SidebarAccountMenu/SidebarAccountMenu";
 import ViewSwitcher from "./Navbar/ViewSwitcher";
-import LiteAdminTrigger from "./liteadmin/LiteAdmin";
 import { AriaAvatar } from "./liteadmin/AriaAvatar";
 import { ARIA_AGENT_LABEL } from "./liteadmin/aria-brand";
 import { Kbd } from "./ui/kbd";
-import { useTopBarVariant } from "./TopBar/useTopBarVariant";
 import SidebarUsageCard from "./SidebarUsageCard";
 import { routeSegmentForPathname, uiHref } from "@/utils/uiHref";
 
@@ -524,6 +522,7 @@ export const labelText = (item: MenuItem): string => (typeof item.label === "str
 // Breadcrumb ("Section" / "Page") for the top bar, derived from the same nav config.
 export const getBreadcrumb = (pathname: string): { section: string | null; title: string } => {
   const route = routeForPathname(pathname);
+  if (route === "aria") return { section: null, title: ARIA_AGENT_LABEL };
   for (const group of menuGroups) {
     for (const item of group.items) {
       const section = sectionText(group.groupLabel);
@@ -551,7 +550,6 @@ const Sidebar_: React.FC<SidebarProps> = ({
   const isOrgAdmin = useIsOrgAdmin();
   const { data: teams } = useTeams();
   const { logoUrl, logoUrlDark } = useTheme();
-  const topBarVariant = useTopBarVariant();
   const onAriaPage = (usePathname() ?? "").replace(/\/+$/, "").endsWith("/aria");
   const [erroredDarkLogo, setErroredDarkLogo] = useState<string | null>(null);
   const { data: healthData } = useHealthReadinessDetails(accessToken);
@@ -560,7 +558,7 @@ const Sidebar_: React.FC<SidebarProps> = ({
   const baseUrl = getProxyBaseUrl();
   const version = healthData?.litellm_version;
   const currentRoute = routeForPathname(usePathname());
-  const selectedKey = findMenuItemKey(currentRoute);
+  const selectedKey = onAriaPage ? null : findMenuItemKey(currentRoute);
 
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => {
     const parent = findParentKey(currentRoute);
@@ -701,74 +699,59 @@ const Sidebar_: React.FC<SidebarProps> = ({
 
   return (
     <Sidebar collapsed={collapsed}>
-      {topBarVariant !== "v4" && (
-        <SidebarHeader className="h-14 border-b border-border group-data-[collapsed=true]/sidebar:h-auto">
-          <div className="flex items-center justify-between gap-2 group-data-[collapsed=true]/sidebar:flex-col">
-            <div className="flex min-w-0 items-center gap-2">
-              <Link href={uiHref("")} className="flex min-w-0 items-center" aria-label="LiteLLM home">
-                <img src={logoSrc} alt="LiteLLM" className={cn(LOGO_CLASS_NAME, "dark:hidden")} />
-                <img
-                  src={darkLogoSrc}
-                  alt=""
-                  aria-hidden
-                  onError={() => setErroredDarkLogo(logoUrlDark)}
-                  className={cn(LOGO_CLASS_NAME, "hidden dark:block")}
-                />
-              </Link>
-              {version && (
-                <Badge
-                  variant="outline"
-                  render={<a href="https://docs.litellm.ai/release_notes" target="_blank" rel="noopener noreferrer" />}
-                  className="px-1.5 py-0 font-mono text-[10px] font-medium text-muted-foreground group-data-[collapsed=true]/sidebar:hidden"
-                >
-                  v{version}
-                </Badge>
-              )}
-            </div>
-            {onToggleCollapsed && (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onToggleCollapsed}
-                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                className="flex-none text-muted-foreground"
+      <SidebarHeader className="h-14 border-b border-border group-data-[collapsed=true]/sidebar:h-auto">
+        <div className="flex items-center justify-between gap-2 group-data-[collapsed=true]/sidebar:flex-col">
+          <div className="flex min-w-0 items-center gap-2">
+            <Link href={uiHref("")} className="flex min-w-0 items-center" aria-label="LiteLLM home">
+              <img src={logoSrc} alt="LiteLLM" className={cn(LOGO_CLASS_NAME, "dark:hidden")} />
+              <img
+                src={darkLogoSrc}
+                alt=""
+                aria-hidden
+                onError={() => setErroredDarkLogo(logoUrlDark)}
+                className={cn(LOGO_CLASS_NAME, "hidden dark:block")}
+              />
+            </Link>
+            {version && (
+              <Badge
+                variant="outline"
+                render={<a href="https://docs.litellm.ai/release_notes" target="_blank" rel="noopener noreferrer" />}
+                className="px-1.5 py-0 font-mono text-[10px] font-medium text-muted-foreground group-data-[collapsed=true]/sidebar:hidden"
               >
-                {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-              </Button>
+                v{version}
+              </Badge>
             )}
           </div>
-        </SidebarHeader>
-      )}
-      {(topBarVariant === "v5" || topBarVariant === "v7" || topBarVariant === "v8") && (
-        <div className="px-3 pt-3 group-data-[collapsed=true]/sidebar:px-2">
-          <ViewSwitcher className="w-full max-w-none justify-start [&_[data-slot=workspace-chevron]]:ml-auto group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0 group-data-[collapsed=true]/sidebar:[&_[data-slot=workspace-chevron]]:hidden group-data-[collapsed=true]/sidebar:[&_[data-slot=workspace-label]]:hidden" />
+          {onToggleCollapsed && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onToggleCollapsed}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="flex-none text-muted-foreground"
+            >
+              {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+            </Button>
+          )}
         </div>
-      )}
-      {topBarVariant === "v8" && (
-        <div className="px-3 pt-3 group-data-[collapsed=true]/sidebar:px-2">
-          <Link
-            href={uiHref("aria")}
-            aria-label={ARIA_AGENT_LABEL}
-            className={cn(
-              "flex h-9 items-center gap-2 rounded-lg px-2 text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0",
-              onAriaPage && "bg-sidebar-accent",
-            )}
-          >
-            <AriaAvatar size={22} />
-            <span className="group-data-[collapsed=true]/sidebar:hidden">{ARIA_AGENT_LABEL}</span>
-            <Kbd className="ml-auto group-data-[collapsed=true]/sidebar:hidden">⌘J</Kbd>
-          </Link>
-        </div>
-      )}
-      {(topBarVariant === "v6" || topBarVariant === "v7") && (
-        <div className="px-3 pt-3 group-data-[collapsed=true]/sidebar:px-2">
-          <LiteAdminTrigger
-            avatarSize={22}
-            className="h-9 w-full justify-start gap-2 rounded-lg border-transparent bg-transparent px-2 font-medium text-sidebar-foreground hover:bg-sidebar-accent aria-expanded:bg-sidebar-accent dark:border-transparent dark:bg-transparent dark:text-sidebar-foreground [&_kbd]:ml-auto group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0"
-            labelClassName="inline group-data-[collapsed=true]/sidebar:hidden"
-          />
-        </div>
-      )}
+      </SidebarHeader>
+      <div className="px-3 pt-3 group-data-[collapsed=true]/sidebar:px-2">
+        <ViewSwitcher className="w-full max-w-none justify-start [&_[data-slot=workspace-chevron]]:ml-auto group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0 group-data-[collapsed=true]/sidebar:[&_[data-slot=workspace-chevron]]:hidden group-data-[collapsed=true]/sidebar:[&_[data-slot=workspace-label]]:hidden" />
+      </div>
+      <div className="px-3 pt-3 group-data-[collapsed=true]/sidebar:px-2">
+        <Link
+          href={uiHref("aria")}
+          aria-label={ARIA_AGENT_LABEL}
+          className={cn(
+            "flex h-9 items-center gap-2 rounded-lg px-2 text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0",
+            onAriaPage && "bg-sidebar-accent",
+          )}
+        >
+          <AriaAvatar size={22} />
+          <span className="group-data-[collapsed=true]/sidebar:hidden">{ARIA_AGENT_LABEL}</span>
+          <Kbd className="ml-auto group-data-[collapsed=true]/sidebar:hidden">⌘J</Kbd>
+        </Link>
+      </div>
 
       <ScrollArea className="min-h-0 flex-1">
         <nav className="flex flex-col gap-0.5 px-3 pb-3">

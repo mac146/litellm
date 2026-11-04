@@ -3,7 +3,6 @@
 import React, { Suspense, useState, useRef, useEffect } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { DashboardHeader } from "@/components/DashboardHeader";
-import { useTopBarVariant } from "@/components/TopBar/useTopBarVariant";
 import Navbar from "@/components/navbar";
 import LoadingScreen from "@/components/common_components/LoadingScreen";
 import { ThemeProvider } from "@/contexts/ThemeContext";
@@ -140,8 +139,6 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   const toggleSidebar = () => setSidebarOverride({ segment: routeSegment, collapsed: !sidebarCollapsed });
 
   const isGateway = mode === "ai-gateway";
-  const topBarVariant = useTopBarVariant();
-  const fullWidthBar = topBarVariant === "v4";
 
   // Non-gateway (agent control plane) mode keeps the original full-width Navbar,
   // which carries the account menu; the redesigned sidebar + header shell is
@@ -174,31 +171,19 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
       navigationTrigger={
         <SheetTrigger
           handle={mobileNavigationHandle}
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              className={topBarVariant ? "size-9 md:hidden" : "size-11 md:hidden"}
-              aria-label="Open navigation"
-            />
-          }
+          render={<Button variant="ghost" size="icon" className="size-9 md:hidden" aria-label="Open navigation" />}
         >
           <Menu />
         </SheetTrigger>
       }
-      deploymentHealth={
-        <DeploymentHealthIcon handle={deploymentHealthHandle} onlyWhenActive={topBarVariant !== null} />
-      }
-      sidebarCollapsed={sidebarCollapsed}
-      onToggleSidebar={toggleSidebar}
+      deploymentHealth={<DeploymentHealthIcon handle={deploymentHealthHandle} onlyWhenActive />}
     />
   );
 
   return (
     <LiteAdminFrame>
       <CommandPaletteProvider>
-        <div className={`flex h-screen overflow-hidden bg-background max-md:h-dvh ${fullWidthBar ? "flex-col" : ""}`}>
-          {fullWidthBar && headerBar}
+        <div className="flex h-screen overflow-hidden bg-background max-md:h-dvh">
           <div className="flex min-h-0 flex-1 overflow-hidden">
             <div className="hidden h-full md:flex">
               <SidebarProvider sidebarCollapsed={sidebarCollapsed} onToggleCollapsed={toggleSidebar} />
@@ -221,7 +206,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
               </SheetContent>
             </Sheet>
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-              {!fullWidthBar && headerBar}
+              {headerBar}
               <DeploymentHealthBanner handle={deploymentHealthHandle} />
               <DeploymentHealthPanel handle={deploymentHealthHandle} />
               <UserBanner accessToken={accessToken} />
