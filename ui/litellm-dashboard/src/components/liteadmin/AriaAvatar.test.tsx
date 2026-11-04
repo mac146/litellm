@@ -8,7 +8,7 @@ describe("AriaAvatar", () => {
 
     const icon = container.firstElementChild as HTMLElement;
     expect(icon).toHaveAttribute("aria-hidden", "true");
-    expect(icon.style.width).toBe("40px");
+    expect(icon).toHaveStyle({ width: "40px", height: "40px" });
     expect(icon.querySelector("svg")).not.toBeNull();
   });
 });
