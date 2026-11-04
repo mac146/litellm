@@ -1,6 +1,7 @@
 import asyncio, gzip, importlib, os
 import io
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Final, Literal, get_type_hints
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -63,6 +64,31 @@ def _starlette_request(
         return {"type": "http.request", "body": next(chunks, b""), "more_body": False}
 
     return Request(scope, receive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, path_params", [
+    ("/claude-code/plugins/skill/archive/digest.zip", {"plugin_name": "skill"}),
+    ("/vector_stores/vs-safe/files", {}),
+])
+async def test_request_vector_store_values_cannot_forge_debug_log_lines(
+    path: str, path_params: Mapping[str, str], caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    untrusted: Final = "private-value\r\nFORGED LOG LINE"
+    request: Final = _starlette_request(
+        json.dumps({"vector_store_ids": [untrusted]}).encode(), "application/json", path,
+    )
+    request.scope["path_params"] = dict(path_params)
+    logger: Final = logging.getLogger("test.skill_request_logging")
+    monkeypatch.setattr(http_parsing_utils, "verbose_proxy_logger", logger)
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        parsed: Final = await read_request_body(request)
+        result: Final = populate_request_with_path_params(parsed, request)
+    assert untrusted in result["vector_store_ids"]
+    assert "populate_request_with_path_params" in caplog.text
+    assert "private-value" not in caplog.text
+    assert "FORGED LOG LINE" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -377,7 +403,7 @@ async def test_form_data_with_json_metadata():
 
 
 @pytest.mark.asyncio
-async def test_form_data_with_invalid_json_metadata():
+async def test_form_data_with_invalid_json_metadata() -> None:
     """
     Test that form data with invalid JSON in metadata field raises an exception.
 
@@ -398,9 +424,10 @@ async def test_form_data_with_invalid_json_metadata():
     mock_request.scope = {}
     mock_request.state._cached_headers = None
 
-    # Should raise JSONDecodeError when trying to parse invalid JSON metadata
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(ProxyException) as exc_info:
         await read_request_body(mock_request)
+    assert exc_info.value.code == "400"
+    assert exc_info.value.param == "metadata"
 
 
 @pytest.mark.asyncio

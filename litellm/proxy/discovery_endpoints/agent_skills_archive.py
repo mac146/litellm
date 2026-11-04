@@ -8,8 +8,11 @@ SHA-256 digest published in the index reproducible for identical uploads.
 
 import hashlib
 import io
+import lzma
 import re
+import stat
 import zipfile
+import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -38,18 +41,24 @@ class SkillArchive:
     declared_description: str | None
 
 
-def build_skill_archive(stored_content: bytes) -> SkillArchive | None:
+def build_skill_archive(
+    stored_content: bytes, *, ignore_macos_metadata: bool = False, read_frontmatter: bool = True
+) -> SkillArchive | None:
     """Return the installable archive for an upload, or None when it holds no root SKILL.md."""
     try:
         with zipfile.ZipFile(io.BytesIO(stored_content)) as uploaded:
-            members: Final = _flattened_members(uploaded)
-    except (zipfile.BadZipFile, OSError, RuntimeError):
+            members: Final = _flattened_members(uploaded, ignore_macos_metadata=ignore_macos_metadata)
+    except (zipfile.BadZipFile, OSError, RuntimeError, EOFError, lzma.LZMAError, zlib.error):
         return None
 
     if members is None:
         return None
 
-    frontmatter: Final = _manifest_frontmatter(next(data for name, data in members if name == SKILL_MANIFEST_FILENAME))
+    frontmatter: Final = (
+        _manifest_frontmatter(next(data for name, data in members if name == SKILL_MANIFEST_FILENAME))
+        if read_frontmatter
+        else _EMPTY_FRONTMATTER
+    )
     content: Final = _repack(members)
     return SkillArchive(
         content=content,
@@ -59,24 +68,46 @@ def build_skill_archive(stored_content: bytes) -> SkillArchive | None:
     )
 
 
-def _flattened_members(uploaded: zipfile.ZipFile) -> tuple[tuple[str, bytes], ...] | None:
-    infos: Final = tuple(info for info in uploaded.infolist() if not info.is_dir())
+def _flattened_members(
+    uploaded: zipfile.ZipFile, *, ignore_macos_metadata: bool
+) -> tuple[tuple[str, bytes], ...] | None:
+    infos: Final = tuple(info for info in uploaded.infolist() if ignore_macos_metadata or not info.is_dir())
     if not infos or len(infos) > MAX_ARCHIVE_ENTRIES:
         return None
     if sum(info.file_size for info in infos) > MAX_ARCHIVE_UNPACKED_BYTES:
         return None
 
-    normalized: Final = tuple((info, _normalized_path(info.filename)) for info in infos)
+    normalized: Final = tuple(
+        (info, _normalized_path(info.orig_filename if ignore_macos_metadata else info.filename)) for info in infos
+    )
     if any(path is None for _, path in normalized):
         return None
+    if ignore_macos_metadata and (
+        len(frozenset(path for _, path in normalized)) != len(normalized)
+        or any(not _safe_upload_entry(info) for info in infos)
+    ):
+        return None
 
-    prefix: Final = _common_root_prefix(tuple(path for _, path in normalized if path is not None))
-    flattened: Final = tuple((info, path[len(prefix) :]) for info, path in normalized if path is not None)
+    kept: Final = tuple(
+        (info, path)
+        for info, path in normalized
+        if path is not None and not info.is_dir() and (not ignore_macos_metadata or not _is_macos_metadata(path))
+    )
+    prefix: Final = _common_root_prefix(tuple(path for _, path in kept))
+    flattened: Final = tuple((info, path[len(prefix) :]) for info, path in kept)
     names: Final = frozenset(name for _, name in flattened)
     if SKILL_MANIFEST_FILENAME not in names or len(names) != len(flattened):
         return None
 
     return tuple((name, uploaded.read(info)) for info, name in sorted(flattened, key=lambda member: member[1]))
+
+
+def _safe_upload_entry(info: zipfile.ZipInfo) -> bool:
+    return not info.flag_bits & 1 and stat.S_IFMT(info.external_attr >> 16) in (0, stat.S_IFREG, stat.S_IFDIR)
+
+
+def _is_macos_metadata(path: str) -> bool:
+    return path.split("/", 1)[0] == "__MACOSX" or path.rsplit("/", 1)[-1] == ".DS_Store"
 
 
 def _common_root_prefix(paths: tuple[str, ...]) -> str:

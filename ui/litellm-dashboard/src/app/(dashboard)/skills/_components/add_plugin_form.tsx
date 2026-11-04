@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n/i18n";
 import { z } from "zod";
 import { toast } from "@/lib/toast";
-import { registerClaudeCodePlugin } from "@/components/networking";
+import { registerClaudeCodePlugin, uploadClaudeCodeSkill } from "@/components/networking";
 import { FieldGroup } from "@/components/ui/field";
 import { FormField } from "@/components/shared/form/FormField";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox";
 import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useZodForm } from "@/lib/forms/useZodForm";
@@ -43,11 +44,10 @@ interface AddPluginFormProps {
 }
 
 const addPluginShape = {
-  skillUrl: z.string().min(1, { error: () => i18n.t("skills.addForm.errors.urlRequired") }),
-  subPath: z.string().refine((value) => !value || isValidSubPath(value), {
-    error: () => i18n.t("skills.addForm.errors.subPathInvalid"),
-  }),
-  sha256: z.string().refine(isValidSha256, { error: () => i18n.t("skills.addForm.errors.sha256Invalid") }),
+  sourceType: z.enum(["url", "upload"]),
+  skillUrl: z.string(),
+  subPath: z.string(),
+  sha256: z.string(),
   name: z
     .string()
     .min(1, { error: () => i18n.t("skills.addForm.errors.nameRequired") })
@@ -64,11 +64,25 @@ const addPluginShape = {
   }),
 };
 
-const addPluginSchema = z.object(addPluginShape);
+const addPluginSchema = z.object(addPluginShape).superRefine((values, context) => {
+  if (values.sourceType === "upload") return;
+  if (!values.skillUrl) {
+    context.addIssue({ code: "custom", path: ["skillUrl"], message: i18n.t("skills.addForm.errors.urlRequired") });
+  }
+  if (values.subPath && !isValidSubPath(values.subPath)) {
+    context.addIssue({ code: "custom", path: ["subPath"], message: i18n.t("skills.addForm.errors.subPathInvalid") });
+  }
+  if (!isValidSha256(values.sha256)) {
+    context.addIssue({ code: "custom", path: ["sha256"], message: i18n.t("skills.addForm.errors.sha256Invalid") });
+  }
+});
 
 type AddPluginFormValues = z.infer<typeof addPluginSchema>;
 
+const MAX_SKILL_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 const EMPTY_VALUES: AddPluginFormValues = {
+  sourceType: "url",
   skillUrl: "",
   subPath: "",
   sha256: "",
@@ -100,11 +114,10 @@ const withArchiveDigest = (source: PluginSource, sha256: string): PluginSource =
   return source.source === "archive" && digest ? { ...source, sha256: digest.toLowerCase() } : source;
 };
 
-const buildRegisterRequest = (values: AddPluginFormValues, source: PluginSource): SkillRegisterRequest => {
+const buildSkillMetadata = (values: AddPluginFormValues): Omit<SkillRegisterRequest, "source"> => {
   const author = buildAuthor(values);
   return {
     name: values.name.trim(),
-    source: withArchiveDigest(source, values.sha256),
     ...(values.version ? { version: values.version.trim() } : {}),
     ...(values.description ? { description: values.description.trim() } : {}),
     ...(author ? { author } : {}),
@@ -152,6 +165,47 @@ const AddPluginForm: React.FC<AddPluginFormProps> = ({ visible, onClose, accessT
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [urlPreview, setUrlPreview] = useState<SkillSourcePreview | null>(null);
   const [subPathLock, setSubPathLock] = useState<SubPathLock | null>(null);
+  const [archiveFile, setArchiveFile] = useState<File | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveInputKey, setArchiveInputKey] = useState(0);
+  const isUpload = form.watch("sourceType") === "upload";
+
+  const clearArchive = () => {
+    setArchiveFile(null);
+    setArchiveError(null);
+    setArchiveInputKey((key) => key + 1);
+  };
+
+  const handleSourceChange = (value: unknown) => {
+    if (value !== "url" && value !== "upload") return;
+    form.setValue("sourceType", value);
+    clearArchive();
+    form.clearErrors(["skillUrl", "subPath", "sha256"]);
+  };
+
+  const selectArchive = (file: File | undefined) => {
+    setArchiveFile(file ?? null);
+    setArchiveError(null);
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setArchiveError(t("skills.addForm.errors.zipRequired"));
+      return;
+    }
+    if (file.size > MAX_SKILL_UPLOAD_BYTES) {
+      setArchiveError(t("skills.addForm.errors.zipTooLarge"));
+      return;
+    }
+    if (!form.getValues("name")) {
+      form.setValue(
+        "name",
+        file.name
+          .slice(0, -4)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, ""),
+      );
+    }
+  };
 
   const recomputePreview = (skillUrl: string, subPath: string) => {
     const lock = subPathLockFor(parseSkillSource(skillUrl)?.parsed.source);
@@ -175,7 +229,12 @@ const AddPluginForm: React.FC<AddPluginFormProps> = ({ visible, onClose, accessT
       return;
     }
 
-    if (!urlPreview) {
+    if (values.sourceType === "upload" && (!archiveFile || archiveError)) {
+      setArchiveError(archiveError ?? t("skills.addForm.errors.zipRequired"));
+      return;
+    }
+
+    if (values.sourceType === "url" && !urlPreview) {
       toast.error(t("skills.addForm.toasts.invalidUrl"));
       return;
     }
@@ -197,7 +256,16 @@ const AddPluginForm: React.FC<AddPluginFormProps> = ({ visible, onClose, accessT
 
     setIsSubmitting(true);
     try {
-      await registerClaudeCodePlugin(accessToken, buildRegisterRequest(values, urlPreview.parsed));
+      const metadata = buildSkillMetadata(values);
+      if (values.sourceType === "upload" && archiveFile) {
+        await uploadClaudeCodeSkill(accessToken, archiveFile, metadata);
+      } else if (urlPreview) {
+        await registerClaudeCodePlugin(accessToken, {
+          ...metadata,
+          source: withArchiveDigest(urlPreview.parsed, values.sha256),
+        });
+      }
+      clearArchive();
       toast.success(t("skills.addForm.toasts.registered"));
       form.reset(EMPTY_VALUES);
       setUrlPreview(null);
@@ -213,6 +281,8 @@ const AddPluginForm: React.FC<AddPluginFormProps> = ({ visible, onClose, accessT
   };
 
   const handleCancel = () => {
+    if (isSubmitting) return;
+    clearArchive();
     form.reset(EMPTY_VALUES);
     setUrlPreview(null);
     setSubPathLock(null);
@@ -228,67 +298,128 @@ const AddPluginForm: React.FC<AddPluginFormProps> = ({ visible, onClose, accessT
         <TooltipProvider>
           <form onSubmit={form.handleSubmit(handleSubmit)} noValidate className="mt-4">
             <FieldGroup>
-              <FormField
-                control={form.control}
-                name="skillUrl"
-                label={labelWithHint(t("skills.addForm.labels.sourceUrl"), t("skills.addForm.hints.sourceUrl"))}
-              >
-                {({ ref, onChange, ...field }) => (
-                  <Input
-                    {...field}
-                    ref={ref}
-                    placeholder={t("skills.addForm.placeholders.sourceUrl")}
-                    className="rounded-lg"
-                    onChange={(event) => {
-                      onChange(event);
-                      recomputePreview(event.target.value, form.getValues("subPath"));
-                    }}
-                  />
+              <FormField control={form.control} name="sourceType" label={t("skills.addForm.labels.source")}>
+                {({ value }) => (
+                  <RadioGroup
+                    value={value}
+                    disabled={isSubmitting}
+                    onValueChange={handleSourceChange}
+                    aria-label={t("skills.addForm.labels.source")}
+                    className="flex gap-6"
+                  >
+                    <label className="flex items-center gap-2 text-sm">
+                      <RadioGroupItem value="url" />
+                      {t("skills.addForm.sourceOptions.url")}
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <RadioGroupItem value="upload" />
+                      {t("skills.addForm.sourceOptions.upload")}
+                    </label>
+                  </RadioGroup>
                 )}
               </FormField>
 
-              <FormField
-                control={form.control}
-                name="subPath"
-                label={labelWithHint(t("skills.addForm.labels.subPath"), t("skills.addForm.hints.subPath"))}
-                description={subPathLock ? t(SUB_PATH_LOCK_REASON_KEY[subPathLock]) : undefined}
-              >
-                {({ ref, onChange, ...field }) => (
+              {isUpload ? (
+                <div className="flex flex-col gap-2">
+                  <label htmlFor="skill-archive" className="text-sm font-medium">
+                    {t("skills.addForm.labels.archive")}
+                  </label>
                   <Input
-                    {...field}
-                    ref={ref}
-                    placeholder="plugins/my-skill"
-                    className="rounded-lg"
-                    onChange={(event) => {
-                      onChange(event);
-                      recomputePreview(form.getValues("skillUrl"), event.target.value);
-                    }}
-                    disabled={subPathLock !== null}
+                    key={archiveInputKey}
+                    id="skill-archive"
+                    type="file"
+                    accept=".zip,application/zip"
+                    disabled={isSubmitting}
+                    aria-invalid={!!archiveError}
+                    aria-describedby={archiveError ? "skill-archive-hint skill-archive-error" : "skill-archive-hint"}
+                    onChange={(event) => selectArchive(event.target.files?.[0])}
                   />
-                )}
-              </FormField>
-
-              {urlPreview?.parsed.source === "archive" && (
-                <FormField
-                  control={form.control}
-                  name="sha256"
-                  label={labelWithHint(t("skills.addForm.labels.sha256"), t("skills.addForm.hints.sha256"))}
-                >
-                  {({ ref, ...field }) => (
-                    <Input
-                      {...field}
-                      ref={ref}
-                      placeholder={t("skills.addForm.placeholders.sha256")}
-                      className="rounded-lg font-mono"
-                    />
+                  <p id="skill-archive-hint" className="text-sm text-muted-foreground">
+                    {t("skills.addForm.hints.archive")}
+                  </p>
+                  {archiveError && (
+                    <p id="skill-archive-error" role="alert" className="text-sm text-destructive">
+                      {archiveError}
+                    </p>
                   )}
-                </FormField>
-              )}
-
-              {urlPreview && (
-                <div className="rounded-lg border border-info/20 bg-info/10 px-3 py-2 text-sm text-info">
-                  {t("skills.addForm.detected", { source: urlPreview.label })}
+                  {archiveFile && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="self-start"
+                      onClick={clearArchive}
+                      disabled={isSubmitting}
+                    >
+                      {t("skills.addForm.removeFile")}
+                    </Button>
+                  )}
                 </div>
+              ) : (
+                <>
+                  <FormField
+                    control={form.control}
+                    name="skillUrl"
+                    label={labelWithHint(t("skills.addForm.labels.sourceUrl"), t("skills.addForm.hints.sourceUrl"))}
+                  >
+                    {({ ref, onChange, ...field }) => (
+                      <Input
+                        {...field}
+                        ref={ref}
+                        placeholder={t("skills.addForm.placeholders.sourceUrl")}
+                        className="rounded-lg"
+                        onChange={(event) => {
+                          onChange(event);
+                          recomputePreview(event.target.value, form.getValues("subPath"));
+                        }}
+                      />
+                    )}
+                  </FormField>
+
+                  <FormField
+                    control={form.control}
+                    name="subPath"
+                    label={labelWithHint(t("skills.addForm.labels.subPath"), t("skills.addForm.hints.subPath"))}
+                    description={subPathLock ? t(SUB_PATH_LOCK_REASON_KEY[subPathLock]) : undefined}
+                  >
+                    {({ ref, onChange, ...field }) => (
+                      <Input
+                        {...field}
+                        ref={ref}
+                        placeholder="plugins/my-skill"
+                        className="rounded-lg"
+                        onChange={(event) => {
+                          onChange(event);
+                          recomputePreview(form.getValues("skillUrl"), event.target.value);
+                        }}
+                        disabled={subPathLock !== null}
+                      />
+                    )}
+                  </FormField>
+
+                  {urlPreview?.parsed.source === "archive" && (
+                    <FormField
+                      control={form.control}
+                      name="sha256"
+                      label={labelWithHint(t("skills.addForm.labels.sha256"), t("skills.addForm.hints.sha256"))}
+                    >
+                      {({ ref, ...field }) => (
+                        <Input
+                          {...field}
+                          ref={ref}
+                          placeholder={t("skills.addForm.placeholders.sha256")}
+                          className="rounded-lg font-mono"
+                        />
+                      )}
+                    </FormField>
+                  )}
+
+                  {urlPreview && (
+                    <div className="rounded-lg border border-info/20 bg-info/10 px-3 py-2 text-sm text-info">
+                      {t("skills.addForm.detected", { source: urlPreview.label })}
+                    </div>
+                  )}
+                </>
               )}
 
               <FormField

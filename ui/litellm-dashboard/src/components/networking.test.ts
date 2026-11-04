@@ -1225,3 +1225,29 @@ describe("searchToolQueryCall", () => {
     await expect(Networking.searchToolQueryCall("token", "exa-search-2", "litellm")).rejects.toThrow(errorMessage);
   });
 });
+
+describe("uploadClaudeCodeSkill", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends the archive bytes and metadata as one authenticated multipart request", async () => {
+    const response = { status: "success", action: "created" };
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json(response));
+    vi.stubGlobal("fetch", fetch);
+    const file = new File(["skill archive bytes"], "personal.zip", { type: "application/zip" });
+    const metadata = { name: "personal", description: "Personal workflow", keywords: ["workflow"] };
+
+    expect(await Networking.uploadClaudeCodeSkill("upload-token", file, metadata)).toEqual(response);
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toContain("/claude-code/plugins/upload");
+    expect(init?.method).toBe("POST");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("Authorization")).toBe("Bearer upload-token");
+    expect(headers.has("Content-Type")).toBe(false);
+    expect(init?.body).toBeInstanceOf(FormData);
+    const body = init?.body as FormData;
+    expect(body.get("metadata")).toBe(JSON.stringify(metadata));
+    expect(body.get("file")).toBe(file);
+    expect(Array.from(body.keys())).toEqual(["file", "metadata"]);
+  });
+});

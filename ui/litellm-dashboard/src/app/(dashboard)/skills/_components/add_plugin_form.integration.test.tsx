@@ -3,14 +3,16 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderWithProviders } from "@/../tests/test-utils";
 import AddPluginForm from "./add_plugin_form";
-import { registerClaudeCodePlugin } from "@/components/networking";
+import { registerClaudeCodePlugin, uploadClaudeCodeSkill } from "@/components/networking";
 import { toast } from "@/lib/toast";
 
 vi.mock("@/components/networking", () => ({
   registerClaudeCodePlugin: vi.fn().mockResolvedValue({ status: "success" }),
+  uploadClaudeCodeSkill: vi.fn().mockResolvedValue({ status: "success" }),
 }));
 
 const mockRegister = vi.mocked(registerClaudeCodePlugin);
+const mockUpload = vi.mocked(uploadClaudeCodeSkill);
 const mockMessageError = vi.mocked(toast.error);
 
 const DEFAULT_PROPS = {
@@ -34,7 +36,7 @@ describe("AddPluginForm", () => {
   it("renders the host-agnostic source URL input and subfolder field, hiding the digest until a zip is entered", () => {
     renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
 
-    expect(screen.getByText("Source URL")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Source URL" })).toBeChecked();
     expect(screen.getByPlaceholderText(URL_PLACEHOLDER)).toBeInTheDocument();
     expect(screen.getByText("Subfolder path (Optional)")).toBeInTheDocument();
     expect(screen.getByPlaceholderText(SUBPATH_PLACEHOLDER)).toBeInTheDocument();
@@ -363,5 +365,111 @@ describe("AddPluginForm", () => {
       expect(mockMessageError).toHaveBeenCalledWith(conflictMessage);
     });
     expect(mockMessageError).toHaveBeenCalledTimes(1);
+  });
+
+  const chooseUpload = () => fireEvent.click(screen.getByRole("radio", { name: "Upload ZIP" }));
+  const chooseFile = (file: File) =>
+    fireEvent.change(screen.getByLabelText("Skill ZIP file"), { target: { files: [file] } });
+  const uploadResult: Awaited<ReturnType<typeof uploadClaudeCodeSkill>> = {
+    status: "success",
+    action: "created",
+    plugin: {
+      id: "uploaded-skill",
+      name: "personal-skill",
+      source: { source: "archive", url: "https://proxy.example.com/skill.zip" },
+      enabled: true,
+    },
+  };
+
+  it("uploads the selected ZIP and metadata together, publishing success only after the upload finishes", async () => {
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof uploadClaudeCodeSkill>>>();
+    mockUpload.mockReturnValueOnce(pending.promise);
+    renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
+    await typeUrl(S3_ZIP_URL);
+    fireEvent.change(screen.getByPlaceholderText(SHA256_PLACEHOLDER), { target: { value: "invalid-for-url" } });
+    chooseUpload();
+    const file = new File(["skill archive"], "personal-skill.zip", { type: "application/zip" });
+    chooseFile(file);
+    fireEvent.change(screen.getByPlaceholderText("my-skill"), { target: { value: "personal-skill" } });
+    fireEvent.change(screen.getByPlaceholderText("A skill that helps with..."), { target: { value: "My workflow" } });
+    await submit();
+
+    expect(mockUpload).toHaveBeenCalledWith("sk-test", file, { name: "personal-skill", description: "My workflow" });
+    expect(mockRegister).not.toHaveBeenCalled();
+    expect(DEFAULT_PROPS.onSuccess).not.toHaveBeenCalled();
+    expect(DEFAULT_PROPS.onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Adding..." })).toBeDisabled();
+    await act(async () => pending.resolve(uploadResult));
+    expect(DEFAULT_PROPS.onSuccess).toHaveBeenCalledOnce();
+    expect(DEFAULT_PROPS.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the selected ZIP and metadata after a failed upload so the user can retry", async () => {
+    mockUpload.mockRejectedValueOnce(new Error("Unable to save skill"));
+    renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
+    chooseUpload();
+    const file = new File(["skill archive"], "personal-skill.zip", { type: "application/zip" });
+    chooseFile(file);
+    await submit();
+
+    expect(mockMessageError).toHaveBeenCalledWith("Unable to save skill");
+    expect(screen.getByPlaceholderText("my-skill")).toHaveValue("personal-skill");
+    expect(DEFAULT_PROPS.onSuccess).not.toHaveBeenCalled();
+    expect(DEFAULT_PROPS.onClose).not.toHaveBeenCalled();
+    await submit();
+    expect(mockUpload).toHaveBeenLastCalledWith("sk-test", file, { name: "personal-skill" });
+    expect(DEFAULT_PROPS.onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["no file", undefined, "Please choose a .zip file"],
+    ["a non-ZIP file", new File(["text"], "SKILL.md"), "Please choose a .zip file"],
+    [
+      "an oversized ZIP",
+      new File([new Uint8Array(10 * 1024 * 1024 + 1)], "large.zip"),
+      "The ZIP file must be 10 MiB or smaller",
+    ],
+  ])("blocks submission with %s", async (_case, file, message) => {
+    renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
+    chooseUpload();
+    fireEvent.change(screen.getByPlaceholderText("my-skill"), { target: { value: "personal-skill" } });
+    if (file) chooseFile(file);
+    await submit();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(message);
+    expect(mockUpload).not.toHaveBeenCalled();
+    expect(mockRegister).not.toHaveBeenCalled();
+  });
+
+  it("removes the selected file and restores URL validation when switching source", async () => {
+    renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
+    chooseUpload();
+    chooseFile(new File(["skill archive"], "personal-skill.zip"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove file" }));
+    await submit();
+    expect(screen.getByRole("alert")).toHaveTextContent("Please choose a .zip file");
+    fireEvent.click(screen.getByRole("radio", { name: "Source URL" }));
+    await submit();
+    expect(await screen.findByText("Please enter a repository or zip archive URL")).toBeInTheDocument();
+    expect(mockUpload).not.toHaveBeenCalled();
+    expect(mockRegister).not.toHaveBeenCalled();
+  });
+
+  it("clears the upload draft when cancelled", async () => {
+    const { rerender } = renderWithProviders(<AddPluginForm {...DEFAULT_PROPS} />);
+    chooseUpload();
+    chooseFile(new File(["skill archive"], "personal-skill.zip"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    rerender(<AddPluginForm {...DEFAULT_PROPS} visible={false} />);
+    rerender(<AddPluginForm {...DEFAULT_PROPS} />);
+
+    expect(screen.getByRole("radio", { name: "Source URL" })).toBeChecked();
+    expect(screen.getByPlaceholderText("my-skill")).toHaveValue("");
+    chooseUpload();
+    expect(screen.queryByRole("button", { name: "Remove file" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("my-skill"), { target: { value: "personal-skill" } });
+    await submit();
+    expect(screen.getByRole("alert")).toHaveTextContent("Please choose a .zip file");
+    expect(mockUpload).not.toHaveBeenCalled();
   });
 });

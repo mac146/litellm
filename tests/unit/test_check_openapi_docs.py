@@ -27,8 +27,20 @@ def test_a_fully_documented_post_has_no_findings(media_type: str) -> None:
 
 
 def test_a_schema_under_another_media_type_still_counts_as_undocumented() -> None:
-    operation: Final = _post_with_media_types("multipart/form-data", "audio/wav")
+    operation: Final = _post_with_media_types("application/octet-stream", "audio/wav")
     assert {v.code for v in checker.violations({"paths": {"/v1/thing": {"post": operation}}})} == {"OA001", "OA003"}
+
+
+def test_documented_multipart_upload_has_no_findings() -> None:
+    operation: Final = _post_with_media_types("multipart/form-data", "application/json")
+    assert checker.violations({"paths": {"/upload": {"post": operation}}}) == ()
+
+
+def test_multipart_without_a_schema_is_still_undocumented() -> None:
+    operation: Final = {**_DOCUMENTED, "requestBody": {"content": {"multipart/form-data": {}}}}
+    assert checker.violations({"paths": {"/upload": {"post": operation}}}) == (
+        checker.Violation("POST", "/upload", "OA001"),
+    )
 
 
 def test_each_missing_piece_is_its_own_rule() -> None:

@@ -1,21 +1,69 @@
 import React, { useState } from "react";
-import { ArrowLeft, Check, Copy, Link2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, Download, Link2 } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import { useClaudeCodeMarketplaceRequiresKey } from "@/app/(dashboard)/hooks/claudeCodeMarketplace/useClaudeCodeMarketplaceRequiresKey";
 import { cn } from "@/lib/cva.config";
+import { downloadBlob } from "@/components/EntityUsageExport/utils";
+import { apiClient, getProxyBaseUrl } from "@/components/networking";
+import { Button } from "@/components/ui/button";
 import {
   buildMarketplaceSettingsSnippet,
   formatInstallCommand,
+  getManagedSkillArchivePath,
   getSourceDisplayText,
   getSourceLink,
   MARKETPLACE_KEY_PLACEHOLDER,
 } from "./helpers";
 import { Plugin } from "./types";
 
-const SkillSource: React.FC<{ source: Plugin["source"] }> = ({ source }) => {
+const SkillSource: React.FC<Pick<SkillDetailProps, "skill" | "accessToken">> = ({ skill, accessToken }) => {
   const { t } = useTranslation();
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const { source } = skill;
+  const archivePath = getManagedSkillArchivePath(
+    skill.name,
+    source,
+    getProxyBaseUrl(),
+    typeof window !== "undefined" ? window.location.origin : undefined,
+  );
+  const downloadArchive = async () => {
+    if (!archivePath || downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const blob = await apiClient.getBlob(archivePath, { accessToken, redirect: "error" });
+      downloadBlob(blob, `${skill.name}.zip`);
+    } catch (error) {
+      setDownloadError(
+        error instanceof Error ? error.message : t("claudeCodePlugins.skillDetail.overview.downloadFailed"),
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
   const link = getSourceLink(source);
   const href = link && source.source === "git-subdir" && source.path ? `${link}/tree/main/${source.path}` : link;
+  if (archivePath) {
+    return (
+      <div className="mb-6">
+        <div className="mb-1 text-xs text-muted-foreground">{t("claudeCodePlugins.skillDetail.overview.source")}</div>
+        <Button variant="link" className="h-auto p-0 text-[13px]" onClick={downloadArchive} disabled={downloading}>
+          <Download className="size-3 shrink-0" />
+          {t(
+            downloading
+              ? "claudeCodePlugins.skillDetail.overview.downloading"
+              : "claudeCodePlugins.skillDetail.overview.downloadZip",
+          )}
+        </Button>
+        {downloadError && (
+          <p role="alert" className="mt-2 text-xs text-destructive">
+            {downloadError}
+          </p>
+        )}
+      </div>
+    );
+  }
   if (href) {
     return (
       <div className="mb-6">
@@ -51,7 +99,7 @@ interface SkillDetailProps {
   onPublishClick?: () => void;
 }
 
-const SkillDetail: React.FC<SkillDetailProps> = ({ skill, onBack }) => {
+const SkillDetail: React.FC<SkillDetailProps> = ({ skill, onBack, accessToken }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("overview");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -187,7 +235,7 @@ const SkillDetail: React.FC<SkillDetailProps> = ({ skill, onBack }) => {
               </span>
             </div>
 
-            <SkillSource source={skill.source} />
+            <SkillSource skill={skill} accessToken={accessToken} />
 
             {skill.keywords && skill.keywords.length > 0 && (
               <div className="mb-6">

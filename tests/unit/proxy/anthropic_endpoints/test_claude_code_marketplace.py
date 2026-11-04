@@ -4,7 +4,10 @@ Unit tests for claude_code_marketplace.py source validation.
 Covers the git-subdir and archive source types added alongside the existing github and url types.
 """
 
+import hashlib
+import io
 import json
+import zipfile
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
@@ -13,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi import HTTPException
+from prisma import Base64, models as prisma_models
+from prisma.errors import UniqueViolationError
 from pydantic import ValidationError
 
 import litellm
@@ -29,7 +34,9 @@ from litellm.proxy.anthropic_endpoints.claude_code_endpoints.claude_code_marketp
     register_plugin,
     update_plugin,
 )
+from litellm.proxy.deps.repositories import get_plugin_upload_repository
 from litellm.proxy.proxy_server import LitellmUserRoles, hash_token
+from litellm.repositories.plugin_upload_repository import PluginUploadRepository
 from litellm.types.proxy.claude_code_endpoints import (
     MarketplaceResponse,
     RegisterPluginRequest,
@@ -83,6 +90,7 @@ def _make_mock_prisma():
     mock_table.create = AsyncMock(side_effect=_create)
     mock_table.update = AsyncMock(side_effect=_update)
     mock_client.db.litellm_claudecodeplugintable = mock_table
+    mock_client.writer_db = mock_client.db
     return mock_client
 
 
@@ -194,6 +202,40 @@ async def test_update_plugin_replaces_existing_source():
     stored = await _read_stored_manifest(name)
     assert stored["source"] == new_source
     assert stored["version"] == "2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_update_plugin_preserves_uploaded_http_source() -> None:
+    table: Final = litellm.proxy.proxy_server.prisma_client.writer_db.litellm_claudecodeplugintable
+    await table.create(data={"name": _UPLOAD_NAME, "manifest_json": json.dumps({"source": _UPLOAD_SOURCE})})
+    request: Final = UpdatePluginRequest(source=_UPLOAD_SOURCE, description="Updated description")
+
+    response: Final = await update_plugin(plugin_name=_UPLOAD_NAME, request=request, user_api_key_dict=_USER)
+    assert response.plugin.description == "Updated description"
+    assert await _read_stored_manifest(_UPLOAD_NAME) == {
+        "name": _UPLOAD_NAME, "source": _UPLOAD_SOURCE, "description": "Updated description",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_plugin_rejects_changed_http_destination() -> None:
+    table: Final = litellm.proxy.proxy_server.prisma_client.writer_db.litellm_claudecodeplugintable
+    await table.create(data={"name": _UPLOAD_NAME, "manifest_json": json.dumps({"source": _UPLOAD_SOURCE})})
+    source: Final = {**_UPLOAD_SOURCE, "url": "http://other.example/skill.zip"}
+
+    with pytest.raises(HTTPException) as error:
+        await update_plugin(
+            plugin_name=_UPLOAD_NAME, request=UpdatePluginRequest(source=source), user_api_key_dict=_USER,
+        )
+    assert error.value.status_code == 400
+    table.update.assert_not_awaited()
+    assert await _read_stored_manifest(_UPLOAD_NAME) == {"source": _UPLOAD_SOURCE}
+
+
+def test_update_plugin_still_requires_source_for_metadata_edits() -> None:
+    with pytest.raises(ValidationError) as error:
+        UpdatePluginRequest.model_validate({"description": "Updated description"})
+    assert [(entry["loc"], entry["type"]) for entry in error.value.errors()] == [(("source",), "missing")]
 
 
 @pytest.mark.asyncio
@@ -1171,3 +1213,251 @@ async def test_marketplace_without_a_database_answers_db_not_connected_for_a_que
 
     assert response.status_code == 500
     assert CommonProxyErrors.db_not_connected_error.value in response.text
+
+
+_UPLOAD_NAME: Final = "local-skill"
+_UPLOAD_DIGEST: Final = hashlib.sha256(b"stored archive").hexdigest()
+_UPLOAD_PATH: Final = f"/claude-code/plugins/{_UPLOAD_NAME}/archive/{_UPLOAD_DIGEST}.zip"
+_UPLOAD_SOURCE: Final = {"source": "archive", "url": f"http://test{_UPLOAD_PATH}", "sha256": _UPLOAD_DIGEST}
+
+
+@pytest.fixture
+def upload_storage(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+    client: Final = litellm.proxy.proxy_server.prisma_client
+    client.writer_db = client.db
+    plugins: Final = client.writer_db.litellm_claudecodeplugintable
+    archives: Final = client.writer_db.litellm_claudecodepluginupload
+    plugins.create = AsyncMock(return_value=prisma_models.LiteLLM_ClaudeCodePluginTable(
+        id="uploaded-id", name=_UPLOAD_NAME, enabled=True,
+    ))
+    plugins.find_unique = AsyncMock(return_value=prisma_models.LiteLLM_ClaudeCodePluginTable(
+        id="uploaded-id", name=_UPLOAD_NAME, enabled=True,
+        manifest_json=json.dumps({"source": _UPLOAD_SOURCE}),
+    ))
+    archives.find_first = AsyncMock(return_value=prisma_models.LiteLLM_ClaudeCodePluginUpload(
+        plugin_name=_UPLOAD_NAME, content=Base64.encode(b"stored archive"),
+    ))
+
+    def provide_uploads() -> PluginUploadRepository:
+        return PluginUploadRepository(client)
+
+    monkeypatch.setattr(litellm.proxy.proxy_server.app, "dependency_overrides", {
+        get_plugin_upload_repository: provide_uploads,
+    })
+    monkeypatch.setattr(litellm.proxy.proxy_server, "general_settings", {})
+    monkeypatch.setattr(litellm.proxy.proxy_server, "user_api_key_cache", DualCache())
+    monkeypatch.setenv("PROXY_BASE_URL", "http://test")
+    monkeypatch.delenv("SERVER_ROOT_PATH", raising=False)
+    return plugins, archives
+
+
+def _skill_upload_zip() -> bytes:
+    buffer: Final = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(zipfile.ZipInfo("local/SKILL.md"), "---\nname: local\ndescription: Notes\n---\nRead guide.md")
+        archive.writestr(zipfile.ZipInfo("local/guide.md"), "Preserve the guide")
+    return buffer.getvalue()
+
+
+async def _post_skill_upload(content: bytes, metadata: str, key: str = MASTER_KEY) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        return await client.post(
+            "/claude-code/plugins/upload", headers={"Authorization": f"Bearer {key}"},
+            data={"metadata": metadata}, files={"file": ("local.zip", content, "application/zip")},
+        )
+
+
+@pytest.mark.asyncio
+async def test_skill_upload_stores_metadata_and_archive_in_one_create(upload_storage: tuple[MagicMock, MagicMock]) -> None:
+    plugins, _ = upload_storage
+    metadata: Final = {"name": _UPLOAD_NAME, "description": "My notes", "namespace": "personal", "version": "2.0.0"}
+    response: Final = await _post_skill_upload(_skill_upload_zip(), json.dumps(metadata))
+
+    assert response.status_code == 200, response.text
+    plugins.create.assert_awaited_once()
+    stored: Final = plugins.create.await_args.kwargs["data"]
+    content: Final = stored["uploaded_archive"]["create"]["content"].decode()
+    digest: Final = hashlib.sha256(content).hexdigest()
+    source: Final = {"source": "archive", "url": f"http://test/claude-code/plugins/{_UPLOAD_NAME}/archive/{digest}.zip", "sha256": digest}
+    assert json.loads(stored["manifest_json"]) == {**metadata, "source": source}
+    assert stored == {
+        "name": _UPLOAD_NAME, "description": "My notes", "version": "2.0.0",
+        "manifest_json": stored["manifest_json"], "created_by": litellm.proxy.proxy_server.litellm_proxy_admin_name,
+        "uploaded_archive": {"create": {"content": Base64.encode(content)}},
+    }
+    assert response.json() == {"status": "success", "action": "created", "plugin": {
+        "id": "uploaded-id", "name": _UPLOAD_NAME, "version": "2.0.0", "description": "My notes",
+        "source": source, "installation_preference": None, "enabled": True,
+    }}
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        assert json.loads(archive.read(".claude-plugin/plugin.json")) == {"name": metadata["name"]}
+        assert archive.read(f"skills/{_UPLOAD_NAME}/guide.md") == b"Preserve the guide"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content, metadata, status", [
+    (b"invalid", json.dumps({"name": _UPLOAD_NAME}), 400),
+    (_skill_upload_zip(), "not-json", 400),
+    (_skill_upload_zip(), json.dumps({"name": "../invalid"}), 422),
+], ids=["invalid-zip", "invalid-json", "invalid-name"])
+async def test_skill_upload_rejects_invalid_input_without_writing(
+    upload_storage: tuple[MagicMock, MagicMock], content: bytes, metadata: str, status: int,
+) -> None:
+    response: Final = await _post_skill_upload(content, metadata)
+    assert response.status_code == status, response.text
+    upload_storage[0].create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_upload_rejects_nonadmin_before_writing(upload_storage: tuple[MagicMock, MagicMock]) -> None:
+    litellm.proxy.proxy_server.user_api_key_cache.set_cache(key=hash_token(_LIMITED_KEY), value=UserAPIKeyAuth(
+        token=hash_token(_LIMITED_KEY), user_role=LitellmUserRoles.INTERNAL_USER,
+    ))
+    response: Final = await _post_skill_upload(_skill_upload_zip(), json.dumps({"name": _UPLOAD_NAME}), _LIMITED_KEY)
+    assert response.status_code == 403, response.text
+    upload_storage[0].create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_upload_duplicate_name_is_a_conflict(upload_storage: tuple[MagicMock, MagicMock]) -> None:
+    upload_storage[0].create.side_effect = UniqueViolationError({"message": "duplicate", "error_code": "P2002"})
+    response: Final = await _post_skill_upload(_skill_upload_zip(), json.dumps({"name": _UPLOAD_NAME}))
+    assert response.status_code == 409, response.text
+    assert "already exists" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled, granted, authenticated, status", [
+    (True, False, False, 200), (False, False, False, 404),
+    (False, False, True, 404), (False, True, True, 200),
+])
+async def test_skill_archive_download_enforces_visibility(
+    upload_storage: tuple[MagicMock, MagicMock], enabled: bool, granted: bool, authenticated: bool, status: int,
+) -> None:
+    plugins, archives = upload_storage
+    plugins.find_unique.return_value.enabled = enabled
+    litellm.proxy.proxy_server.user_api_key_cache.set_cache(key=hash_token(_LIMITED_KEY), value=UserAPIKeyAuth(
+        token=hash_token(_LIMITED_KEY), user_role=LitellmUserRoles.INTERNAL_USER,
+        object_permission=LiteLLM_ObjectPermissionTable(
+            object_permission_id="upload-test-permission", skills=[_UPLOAD_NAME] if granted else [],
+        ),
+    ))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        headers: Final = {"Authorization": f"Bearer {_LIMITED_KEY}"} if authenticated else {}
+        response: Final = await client.get(_UPLOAD_PATH, headers=headers)
+    assert response.status_code == status, response.text
+    assert (response.content == b"stored archive") is (status == 200)
+    plugins.find_unique.assert_awaited_once_with(where={"name": _UPLOAD_NAME})
+    if status == 200:
+        archives.find_first.assert_awaited_once()
+    else:
+        archives.find_first.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", [
+    None, {**_UPLOAD_SOURCE, "sha256": "0" * 64}, {**_UPLOAD_SOURCE, "url": "https://external.example/skill.zip"},
+])
+async def test_skill_archive_download_rejects_missing_or_changed_source(
+    upload_storage: tuple[MagicMock, MagicMock], source: Mapping[str, str] | None,
+) -> None:
+    if source is None:
+        upload_storage[0].find_unique.return_value = None
+    else:
+        upload_storage[0].find_unique.return_value.manifest_json = json.dumps({"source": source})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        response: Final = await client.get(_UPLOAD_PATH)
+    assert response.status_code == 404
+    assert b"stored archive" not in response.content
+    upload_storage[1].find_first.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_archive_download_honors_required_header_auth(
+    upload_storage: tuple[MagicMock, MagicMock], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _require_marketplace_auth(monkeypatch)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        denied: Final = await client.get(_UPLOAD_PATH, params={"key": MASTER_KEY})
+        allowed: Final = await client.get(_UPLOAD_PATH, headers={"Authorization": f"Bearer {MASTER_KEY}"})
+    assert denied.status_code == 401
+    assert denied.headers["www-authenticate"] == "Bearer"
+    assert allowed.status_code == 200
+    assert allowed.content == b"stored archive"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_required", [False, True])
+@pytest.mark.parametrize("configured_header", ["x-skill-key", "X-Skill-Key"])
+@pytest.mark.parametrize("credential, granted, status", [
+    (f"Bearer {_LIMITED_KEY}", True, 200),
+    (f"Bearer {_LIMITED_KEY}", False, 404),
+    ("", True, 401),
+])
+async def test_skill_archive_custom_header_auth_precedes_query_key(
+    upload_storage: tuple[MagicMock, MagicMock], monkeypatch: pytest.MonkeyPatch,
+    auth_required: bool, configured_header: str, credential: str, granted: bool, status: int,
+) -> None:
+    plugins, archives = upload_storage
+    plugins.find_unique.return_value.enabled = False
+    monkeypatch.setattr(litellm.proxy.proxy_server, "general_settings", {
+        "litellm_key_header_name": configured_header,
+        "claude_code_marketplace_auth_required": auth_required,
+    })
+    litellm.proxy.proxy_server.user_api_key_cache.set_cache(key=hash_token(_LIMITED_KEY), value=UserAPIKeyAuth(
+        token=hash_token(_LIMITED_KEY), user_role=LitellmUserRoles.INTERNAL_USER,
+        object_permission=LiteLLM_ObjectPermissionTable(
+            object_permission_id="upload-test-permission", skills=[_UPLOAD_NAME] if granted else [],
+        ),
+    ))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        response: Final = await client.get(
+            _UPLOAD_PATH, headers={"x-skill-key": credential}, params={"key": MASTER_KEY},
+        )
+    assert response.status_code == status, response.text
+    if status == 200:
+        assert response.content == b"stored archive"
+    else:
+        archives.find_first.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skill_archive_disappearing_after_metadata_check_returns_not_found(
+    upload_storage: tuple[MagicMock, MagicMock],
+) -> None:
+    upload_storage[1].find_first.return_value = None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        response: Final = await client.get(_UPLOAD_PATH)
+    assert response.status_code == 404
+    assert b"stored archive" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_skill_upload_and_download_without_database_fail(
+    upload_storage: tuple[MagicMock, MagicMock], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_uploads() -> None:
+        return None
+
+    monkeypatch.setattr(litellm.proxy.proxy_server.app, "dependency_overrides", {get_plugin_upload_repository: no_uploads})
+    uploaded: Final = await _post_skill_upload(_skill_upload_zip(), json.dumps({"name": _UPLOAD_NAME}))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=litellm.proxy.proxy_server.app), base_url="http://test"
+    ) as client:
+        downloaded: Final = await client.get(_UPLOAD_PATH)
+    assert uploaded.status_code == downloaded.status_code == 500
+    assert CommonProxyErrors.db_not_connected_error.value in uploaded.text
+    assert CommonProxyErrors.db_not_connected_error.value in downloaded.text
+    upload_storage[0].create.assert_not_awaited()

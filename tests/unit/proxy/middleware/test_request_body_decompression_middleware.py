@@ -15,6 +15,7 @@ from typing import Final
 import anyio
 import httpx
 import pytest
+from fastapi import FastAPI, File, UploadFile
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -30,6 +31,7 @@ from litellm.proxy.middleware.request_body_decompression_middleware import (
     RequestBodyDecompressionMiddleware,
     load_zstd_codec,
 )
+from litellm.proxy.middleware.request_size_limit_middleware import RequestSizeLimitMiddleware
 
 if sys.version_info >= (3, 14):
     from compression import zstd
@@ -233,6 +235,69 @@ def test_operator_request_size_limit_caps_the_decoded_body_when_it_is_lower(
     over_response: Final = _post(client, over, ("zstd",))
     assert over_response.status_code == 413
     assert over_response.json() == _decoded_too_large(effective_max_mb)
+
+
+@pytest.mark.parametrize("coding", ("gzip", "zstd"))
+@pytest.mark.parametrize("root_path", ("", "/gateway"))
+@pytest.mark.parametrize("operator_max_mb", (None, 1 / 64))
+def test_upload_limit_bounds_decoded_multipart_before_file_parsing(
+    coding: str, root_path: str, operator_max_mb: float | None
+) -> None:
+    app: Final = FastAPI()
+
+    async def upload(file: UploadFile = File(...)) -> dict[str, int]:
+        return {"file_bytes": len(await file.read())}
+
+    app.add_api_route("/claude-code/plugins/upload", upload, methods=["POST"])
+    route_limits: Final = MappingProxyType({("POST", "/claude-code/plugins/upload"): 1 / 32})
+    app.add_middleware(
+        RequestBodyDecompressionMiddleware,
+        get_max_request_size_mb=lambda: operator_max_mb,
+        route_max_request_size_mb=route_limits,
+    )
+    app.add_middleware(
+        RequestSizeLimitMiddleware,
+        get_max_request_size_mb=lambda: operator_max_mb,
+        is_request_size_limit_enabled=lambda: operator_max_mb is not None,
+        route_max_request_size_mb=route_limits,
+    )
+    client: Final = TestClient(app, root_path=root_path)
+
+    def encoded_form(padding_size: int) -> bytes:
+        body: Final = (
+            b'--upload\r\nContent-Disposition: form-data; name="file"; filename="skill.zip"\r\n\r\nskill'
+            b'\r\n--upload\r\nContent-Disposition: form-data; name="extra"; filename="extra.bin"\r\n\r\n'
+            + _low_entropy_text(padding_size)
+            + b"\r\n--upload--\r\n"
+        )
+        return gzip.compress(body, mtime=0) if coding == "gzip" else zstd.compress(body)
+
+    headers: Final = {"content-type": "multipart/form-data; boundary=upload", "content-encoding": coding}
+    path: Final = f"{root_path}/claude-code/plugins/upload"
+    within: Final = client.post(path, content=encoded_form(1024), headers=headers)
+    over: Final = client.post(path, content=encoded_form(48 * 1024), headers=headers)
+
+    assert within.status_code == 200
+    assert within.json() == {"file_bytes": 5}
+    assert over.status_code == 413
+    assert over.json() == _decoded_too_large(operator_max_mb or 1 / 32)
+
+
+def test_proxy_applies_skill_upload_cap_to_decoded_bodies() -> None:
+    from litellm.proxy.proxy_server import app
+
+    body: Final = random.Random(0).randbytes(6 * MIB) + bytes(6 * MIB)
+    compressed: Final = gzip.compress(body, mtime=0)
+
+    response: Final = TestClient(app).post(
+        "/claude-code/plugins/upload",
+        content=compressed,
+        headers={"content-encoding": "gzip", "content-type": "multipart/form-data; boundary=upload"},
+    )
+
+    assert len(compressed) < 11 * MIB
+    assert response.status_code == 413
+    assert response.json() == _decoded_too_large(11)
 
 
 @pytest.mark.parametrize(("signature", "content_encoding"), [(GZIP_MAGIC, "gzip"), (ZSTD_FRAME_MAGIC, "zstd")])

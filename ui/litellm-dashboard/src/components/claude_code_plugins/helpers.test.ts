@@ -4,6 +4,7 @@ import {
   validatePluginName,
   getSourceDisplayText,
   getSourceLink,
+  getManagedSkillArchivePath,
   getCategoryBadgeColor,
   isValidSemanticVersion,
   isValidEmail,
@@ -14,6 +15,54 @@ import {
   isValidSha256,
   buildMarketplaceSettingsSnippet,
 } from "./helpers";
+
+describe("getManagedSkillArchivePath", () => {
+  const digest = "a".repeat(64);
+  const path = `/claude-code/plugins/my-skill/archive/${digest}.zip`;
+  const source = { source: "archive" as const, url: `https://proxy.example.com${path}`, sha256: digest };
+
+  it("returns only the local route for a matching managed archive", () => {
+    expect(getManagedSkillArchivePath("my-skill", source, "https://proxy.example.com/")).toBe(path);
+  });
+
+  it("supports a gateway mounted under a path on the dashboard origin", () => {
+    expect(
+      getManagedSkillArchivePath(
+        "my-skill",
+        { ...source, url: `https://proxy.example.com/gateway${path}` },
+        "/gateway",
+        "https://proxy.example.com",
+      ),
+    ).toBe(path);
+  });
+
+  it.each([
+    `https://other.example.com${path}`,
+    `http://proxy.example.com${path}`,
+    `https://proxy.example.com:8443${path}`,
+    `https://user@proxy.example.com${path}`,
+    `https://proxy.example.com/other${path}`,
+    `https://proxy.example.com${path}?redirect=other`,
+    `https://proxy.example.com${path}#fragment`,
+    `https://proxy.example.com${path.replace("my-skill", "another-skill")}`,
+    `https://proxy.example.com${path.replace(digest, "b".repeat(64))}`,
+  ])("leaves a nonmatching URL as an ordinary source: %s", (url) => {
+    expect(getManagedSkillArchivePath("my-skill", { ...source, url }, "https://proxy.example.com")).toBeNull();
+  });
+
+  it("requires an archive type, a safe skill name and a full SHA256 digest", () => {
+    expect(
+      getManagedSkillArchivePath("my-skill", { ...source, source: "url" }, "https://proxy.example.com"),
+    ).toBeNull();
+    expect(getManagedSkillArchivePath("../my-skill", source, "https://proxy.example.com")).toBeNull();
+    expect(
+      getManagedSkillArchivePath("my-skill", { ...source, sha256: undefined }, "https://proxy.example.com"),
+    ).toBeNull();
+    expect(
+      getManagedSkillArchivePath("my-skill", { ...source, sha256: "short" }, "https://proxy.example.com"),
+    ).toBeNull();
+  });
+});
 
 describe("buildMarketplaceSettingsSnippet", () => {
   it("sends the key placeholder as a bearer header when the proxy requires a key", () => {
