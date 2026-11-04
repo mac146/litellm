@@ -56,7 +56,7 @@ const Navbar: React.FC<NavbarProps> = ({
   return (
     <nav className="sticky top-0 z-chrome border-b border-border bg-card">
       <div className="w-full">
-        <div className="flex h-14 items-center px-4">
+        <div className={cn("flex h-14 items-center px-4", isPublicPage && "gap-4 sm:px-6")}>
           <div className="flex shrink-0 items-center">
             {onToggleSidebar && (
               <button
@@ -77,7 +77,12 @@ const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center gap-2">
               <Link href={uiHref("")} className="flex items-center">
                 <div className="relative">
-                  <div className="flex h-10 max-w-48 items-center justify-center overflow-hidden">
+                  <div
+                    className={cn(
+                      "flex h-10 max-w-48 items-center justify-center overflow-hidden",
+                      isPublicPage && "h-8 max-w-36 sm:h-10 sm:max-w-48",
+                    )}
+                  >
                     <img src={imageUrl} alt="LiteLLM Brand" className={cn(NAV_LOGO_CLASS_NAME, "dark:hidden")} />
                     <img
                       src={darkImageUrl}

@@ -33,21 +33,18 @@ export function CommandPaletteTrigger({ mobile = false, className }: { mobile?: 
   }
 
   return (
-    <button
-      type="button"
-      className={cn(
-        "h-8 shrink-0 items-center justify-between rounded-lg border border-border bg-muted/40 px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted",
-        className ?? "hidden w-64 lg:w-80 md:flex",
-      )}
+    <Button
+      variant="outline"
+      className={cn("justify-between", className ?? "hidden w-64 md:flex lg:w-80")}
       aria-label={label}
       aria-expanded={open}
       onClick={() => setOpen(true)}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <Search className="size-4 shrink-0" />
+        <Search />
         <span className="truncate">{label}</span>
       </span>
-      <Kbd className="ml-2 shrink-0">{shortcut}</Kbd>
-    </button>
+      <Kbd>{shortcut}</Kbd>
+    </Button>
   );
 }
